@@ -1,0 +1,85 @@
+/* The PDF among Emacs's windows: the view takes the frame's own colours
+   around the pages, which stay the white they were set on. */
+
+:root {
+  --paper: #ffffff;
+  --ink: #111111;
+  --faded: #666666;
+  --rule: #e2e2e2;
+  --mark: rgba(0, 0, 0, 0.14);
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--paper);
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* Two stages: one shows the document, the other prepares the next build of
+   it out of sight, and they trade places once its pages are painted. */
+.stage {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: var(--paper);
+  visibility: hidden;
+  overscroll-behavior: none;
+}
+.stage.front { visibility: visible; z-index: 1; }
+
+.pdfViewer {
+  --page-margin: 0 auto;
+  --page-border: 0;
+}
+
+/* A page has no edge of its own: it ends at a hairline, as in a galley. */
+.pdfViewer .page {
+  box-sizing: content-box;
+  box-shadow: 0 1px 0 var(--rule);
+}
+.pdfViewer .page .loadingIcon, .pdfViewer .page.loadingIcon::after { display: none !important; }
+
+.textLayer { -webkit-user-select: text; }
+.textLayer ::selection { background: var(--mark); }
+.textLayer .highlight {
+  background: var(--mark);
+  border-radius: 2px;
+  margin: -1px;
+  padding: 1px;
+}
+.textLayer .highlight.selected { background: rgba(0, 0, 0, 0.42); }
+
+/* Where the source line landed: a band across the line and a tick in the
+   margin, both of which fade. */
+.sync-band, .sync-tick {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+  opacity: 0;
+  animation: sync-fade 1.8s ease-out;
+}
+.sync-band { background: var(--mark); border-radius: 2px; }
+.sync-tick { background: var(--ink); border-radius: 1px; }
+@keyframes sync-fade {
+  0%, 60% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+#notice {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 2em;
+  text-align: center;
+  font: 13px/1.5 -apple-system, sans-serif;
+  color: var(--faded);
+  background: var(--paper);
+  white-space: pre-wrap;
+}
+#notice.shown { display: flex; }
