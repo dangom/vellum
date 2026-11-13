@@ -47,6 +47,15 @@ class Stage {
     this.links.setViewer(this.viewer);
     this.doc = null;
 
+    // A followed link is a jump, and the place it left is remembered.
+    for (const name of ['goToDestination', 'goToPage', 'setHash', 'executeNamedAction']) {
+      const follow = this.links[name].bind(this.links);
+      this.links[name] = (...args) => {
+        if (this === front) remember();
+        return follow(...args);
+      };
+    }
+
     this.bus.on('pagechanging', (e) => { if (this === front) reportPlace(); });
     this.bus.on('scalechanging', () => { if (this === front) reportPlace(); });
     this.bus.on('updatefindcontrolstate', (e) => { if (this === front) reportFind(e); });
@@ -238,14 +247,45 @@ function scroll(unit, amount, smooth = true) {
 function page(n, relative = false) {
   const v = front.viewer;
   if (!v.pagesCount) return;
+  if (!relative) remember();
   const target = Math.min(Math.max(1, relative ? v.currentPageNumber + n : n), v.pagesCount);
   const div = v.getPageView(target - 1).div;
   front.container.scrollTo({ top: div.offsetTop, behavior: 'instant' });
 }
 
 function edge(which) {
+  remember();
   const c = front.container;
   c.scrollTo({ top: which === 'end' ? c.scrollHeight : 0, behavior: 'instant' });
+}
+
+// Places left by jumps (links, a page by number, the ends), to go back to;
+// and those gone back from, to go forward to again.  They are kept apart
+// from the stages, so they survive a rebuild of the document.
+const behind = [], ahead = [];
+
+function remember() {
+  const here = front.place;
+  if (!here) return;
+  const last = behind.at(-1);
+  if (last && last.page === here.page && Math.abs(last.top - here.top) < 0.01) return;
+  behind.push(here);
+  if (behind.length > 100) behind.shift();
+  ahead.length = 0;
+}
+
+// STEP is -1 to go back, 1 to go forward.  The zoom stays as it is now.
+function history(step) {
+  const [from, to] = step < 0 ? [behind, ahead] : [ahead, behind];
+  const there = from.pop();
+  if (!there) {
+    post('history', { empty: step < 0 ? 'back' : 'forward' });
+    return;
+  }
+  const here = front.place;
+  if (here) to.push(here);
+  front.place = { ...there, scale: null };
+  reportPlace();
 }
 
 function zoom(how) {
@@ -474,7 +514,7 @@ function theme(colours) {
 }
 
 window.vellum = {
-  load, scroll, page, edge, zoom, goto, sync, find, findClose, outline, selection, theme,
+  load, scroll, page, edge, history, zoom, goto, sync, find, findClose, outline, selection, theme,
   place: (p) => { front.place = p; reportPlace(); },
 };
 

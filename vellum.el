@@ -298,6 +298,8 @@
            (select-window window))))
       ('inverse (vellum--inverse-search .page .x .y .word))
       ('link (browse-url .url))
+      ('history
+       (message (if (equal .empty "back") "No earlier place" "No later place")))
       ('outline
        (setq vellum--outline .items
              imenu--index-alist nil))
@@ -445,14 +447,21 @@
   "s" #'vellum-search
   "r" #'vellum-search-backward
   "o" #'imenu
+  "l" #'vellum-back
+  "B" #'vellum-back
+  "N" #'vellum-forward
+  "<remap> <xref-go-back>" #'vellum-back
+  "<remap> <xref-go-forward>" #'vellum-forward
   "g" #'vellum-revert)
 
 ;;;###autoload
 (define-derived-mode vellum-mode special-mode "PDF"
   "Read a PDF in a native view laid over this window.
 
-The view scrolls and zooms by trackpad.  A double click, or a click
-with the command key held, goes to the TeX source of that spot.
+The view scrolls and zooms by trackpad.  A click on a link follows it:
+within the PDF it jumps, and \\[vellum-back] goes back; a web address
+opens with `browse-url'.  A double click, or a click with the command
+key held, goes to the TeX source of that spot.
 
 \\{vellum-mode-map}"
   :interactive nil
@@ -551,6 +560,16 @@ with the command key held, goes to the TeX source of that spot.
              (read-number (format "Page (1-%s): "
                                   (or (alist-get 'pages vellum--place) "?"))))))
   (vellum--js "page" page))
+
+(defun vellum-back ()
+  "Go back to where the last jump left: a link, a page by number, an end."
+  (interactive)
+  (vellum--js "history" -1))
+
+(defun vellum-forward ()
+  "Go forward again to where `vellum-back' left."
+  (interactive)
+  (vellum--js "history" 1))
 
 (defun vellum-zoom-in () "Enlarge the PDF." (interactive) (vellum--js "zoom" "in"))
 (defun vellum-zoom-out () "Shrink the PDF." (interactive) (vellum--js "zoom" "out"))

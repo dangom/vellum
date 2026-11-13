@@ -12,6 +12,9 @@ Emacs keys and `C-M-v` scrolls it from the source window.
   goes to the source, down to the word.
 - **Recompiles without a flicker.** When the compiler rewrites the PDF, the
   new one is prepared out of sight and swapped in at the same place and zoom.
+- **Links.** A click follows a link: a reference, a citation, an entry in the
+  table of contents. `l` goes back to where you were; a web address opens
+  with `browse-url`.
 - **Search, outline, copy.** `C-s`, `imenu` (the PDF's table of contents), and
   `M-w` on a mouse selection.
 - It remembers where you were in each file.
@@ -51,6 +54,7 @@ forward search.
 | `+` `-` `w` `f` `1` | zoom in, out; fit width; fit page; actual size |
 | `C-s` `C-r` | search, and again; `C-g` clears the marks |
 | `o` | outline |
+| `l` `B` `N` | back after a link or a jump; back; forward again |
 | `M-w` | copy the selection |
 | `g` | reload |
 
