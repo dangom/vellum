@@ -14,7 +14,7 @@ Emacs keys and `C-M-v` scrolls it from the source window.
   new one is prepared out of sight and swapped in at the same place and zoom.
 - **Links.** A click follows a link: a reference, a citation, an entry in the
   table of contents. `l` goes back to where you were; a web address opens
-  with `browse-url`.
+  with `browse-url`, even one that is only plain text in the PDF.
 - **Search, outline, copy.** `C-s`, `imenu` (the PDF's table of contents), and
   `M-w` on a mouse selection.
 - It remembers where you were in each file.

@@ -40,7 +40,7 @@ class Stage {
       removePageBorders: true,
       textLayerMode: 1,
       annotationMode: pdfjsLib.AnnotationMode.ENABLE,
-      enableAutoLinking: false,
+      enableAutoLinking: true,   // a web address in plain text is a link too
       supportsPinchToZoom: false,
       maxCanvasPixels: 2 ** 25,
     });
