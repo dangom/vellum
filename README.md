@@ -17,6 +17,8 @@ Emacs keys and `C-M-v` scrolls it from the source window.
   with `browse-url`, even one that is only plain text in the PDF.
 - **Search, outline, copy.** `C-s`, `imenu` (the PDF's table of contents), and
   `M-w` on a mouse selection.
+- **Splits like any buffer.** Each window showing a PDF has its own view,
+  with its own place and zoom; keys go to the selected window's.
 - It remembers where you were in each file.
 
 ## Requirements
@@ -70,7 +72,6 @@ forward search.
 
 ## Limits
 
-- One view per buffer: a PDF shown in two windows is drawn in one of them.
 - WebKit does not paint a window that is entirely hidden behind others, so a
   PDF loaded in a covered frame appears when the frame is next seen.
 - Pages are drawn on white whatever the theme; the space around them takes

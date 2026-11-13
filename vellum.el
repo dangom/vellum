@@ -77,18 +77,20 @@
 
 ;;; The module and its channel
 
+;; A PDF buffer has a view for each window showing it, so a split shows the
+;; PDF on both sides, each with its own place and zoom.  While the buffer is
+;; out of sight, one view is kept, hidden, to show it again at once.
+(cl-defstruct (vellum--view (:constructor vellum--view-make) (:copier nil))
+  id buffer window ready queue place loaded after-load)
+
 (defvar vellum--views (make-hash-table :test #'equal)
-  "The live views: id to buffer.")
+  "The live views: id to `vellum--view'.")
+(defvar vellum--buffers nil
+  "The buffers in Vellum mode.")
 (defvar vellum--counter 0)
 (defvar vellum--channel nil
   "The pipe the viewers write their messages to.")
 
-(defvar-local vellum--id nil)
-(defvar-local vellum--ready nil "Non-nil once the viewer page has started.")
-(defvar-local vellum--queue nil "JavaScript waiting for the viewer to start.")
-(defvar-local vellum--place nil "The viewer's last report of where it is.")
-(defvar-local vellum--loaded nil "Non-nil once the PDF has been shown.")
-(defvar-local vellum--after-load nil "Functions to call once the PDF is shown.")
 (defvar-local vellum--watch nil)
 (defvar-local vellum--reload-timer nil)
 (defvar-local vellum--retries 0)
@@ -142,52 +144,142 @@
                                                :array-type 'list
                                                :null-object nil
                                                :false-object nil))
-                   (buffer (gethash (alist-get 'id message) vellum--views)))
-              (when (buffer-live-p buffer)
-                (with-current-buffer buffer
-                  (vellum--receive (intern (alist-get 'type message)) message))))
+                   (view (gethash (alist-get 'id message) vellum--views)))
+              (when (and view (buffer-live-p (vellum--view-buffer view)))
+                (with-current-buffer (vellum--view-buffer view)
+                  (vellum--receive view (intern (alist-get 'type message)) message))))
           (error (message "Vellum: %s" (error-message-string err))))))))
 
-(defun vellum--js (function &rest args)
-  "Call the viewer's FUNCTION with ARGS in the current PDF buffer."
+
+;;; Views
+
+(defun vellum--buffer-views (&optional buffer)
+  "The views of BUFFER, by default the current one."
+  (let ((buffer (or buffer (current-buffer)))
+        views)
+    (maphash (lambda (_id view)
+               (when (eq (vellum--view-buffer view) buffer) (push view views)))
+             vellum--views)
+    views))
+
+(defun vellum--view (&optional buffer)
+  "The view that commands in BUFFER speak to.
+That is the selected window's, else the one over the window used most
+recently, else the hidden one."
+  (let ((views (vellum--buffer-views buffer)))
+    (or (cl-find (selected-window) views :key #'vellum--view-window)
+        (car (sort (cl-remove-if-not
+                    (lambda (view) (window-live-p (vellum--view-window view)))
+                    views)
+                   (lambda (a b) (> (window-use-time (vellum--view-window a))
+                                    (window-use-time (vellum--view-window b))))))
+        (car views))))
+
+(defun vellum--place (&optional view)
+  "Where VIEW (by default the current one) is, in terms that can be restored."
+  (when-let* ((view (or view (vellum--view)))
+              (place (vellum--view-place view)))
+    (cl-loop for key in '(page top left scale)
+             collect (cons key (alist-get key place)))))
+
+(defun vellum--send (view function &rest args)
+  "Call the viewer's FUNCTION with ARGS in VIEW."
   (let ((script (format "vellum.%s(%s);0" function
                         (mapconcat #'json-encode args ","))))
-    (if vellum--ready
-        (vellum-module-eval vellum--id script)
-      (setq vellum--queue (append vellum--queue (list script))))))
+    (if (vellum--view-ready view)
+        (vellum-module-eval (vellum--view-id view) script)
+      (setf (vellum--view-queue view)
+            (append (vellum--view-queue view) (list script))))))
+
+(defun vellum--js (function &rest args)
+  "Call the viewer's FUNCTION with ARGS in the current PDF buffer's view."
+  (when-let* ((view (vellum--view)))
+    (apply #'vellum--send view function args)))
+
+(defun vellum--js-all (function &rest args)
+  "Call the viewer's FUNCTION with ARGS in every view of the current buffer."
+  (dolist (view (vellum--buffer-views))
+    (apply #'vellum--send view function args)))
+
+(defun vellum--initial-place ()
+  "Where a new view of the current buffer opens: where the reader is."
+  (or (vellum--place)
+      (gethash buffer-file-name (vellum--places))
+      `((page . 1) (top . 0) (scale . ,vellum-default-scale))))
+
+(defun vellum--create-view (window place)
+  "A new view of the current buffer's file over WINDOW (or none), at PLACE."
+  (let ((view (vellum--view-make :id (format "v%d" (cl-incf vellum--counter))
+                                 :buffer (current-buffer)
+                                 :window window)))
+    (puthash (vellum--view-id view) view vellum--views)
+    (vellum-module-create (vellum--view-id view)
+                          (expand-file-name "web" vellum-directory)
+                          "vellum://app/index.html"
+                          (vellum--channel))
+    (vellum--send view "theme" (vellum--colours))
+    (vellum--send view "load" buffer-file-name place)
+    view))
+
+(defun vellum--destroy-view (view)
+  (vellum-module-destroy (vellum--view-id view))
+  (remhash (vellum--view-id view) vellum--views))
 
 
-;;; Keeping the view over its window
+;;; Keeping the views over their windows
 
-(defun vellum--window (buffer)
-  "The window BUFFER's view belongs over, if any."
-  (let ((selected (selected-window)))
-    (if (eq (window-buffer selected) buffer)
-        selected
-      (get-buffer-window buffer 'visible))))
+(defun vellum--windows (buffer)
+  "The windows showing BUFFER in graphic frames, the selected one first."
+  (let ((windows (cl-remove-if-not
+                  (lambda (window) (display-graphic-p (window-frame window)))
+                  (get-buffer-window-list buffer 'nomini 'visible))))
+    (if (memq (selected-window) windows)
+        (cons (selected-window) (delq (selected-window) windows))
+      windows)))
 
-(defun vellum--sync-view (id buffer)
-  (let ((window (vellum--window buffer)))
-    (if (not (and window (display-graphic-p (window-frame window))))
-        (vellum-module-hide id)
-      (pcase-let* ((frame (window-frame window))
-                   (`(,fl ,ft ,fr ,fb) (frame-edges frame 'outer-edges))
-                   (`(,l ,top ,r ,b) (window-body-pixel-edges window)))
-        (unless (vellum-module-place id fl ft (- fr fl) (- fb ft)
-                                     l top (- r l) (- b top))
-          (vellum-module-hide id))))))
+(defun vellum--place-view (view)
+  "Lay VIEW over its window."
+  (pcase-let* ((window (vellum--view-window view))
+               (`(,fl ,ft ,fr ,fb) (frame-edges (window-frame window) 'outer-edges))
+               (`(,l ,top ,r ,b) (window-body-pixel-edges window)))
+    (unless (vellum-module-place (vellum--view-id view) fl ft (- fr fl) (- fb ft)
+                                 l top (- r l) (- b top))
+      (vellum-module-hide (vellum--view-id view)))))
+
+(defun vellum--sync-buffer ()
+  "Give each window showing the current buffer a view of its own."
+  (let* ((windows (vellum--windows (current-buffer)))
+         (views (vellum--buffer-views))
+         (kept (cl-remove-if-not (lambda (view) (memq (vellum--view-window view) windows))
+                                 views))
+         (spare (cl-set-difference views kept)))
+    ;; A window without a view takes one whose window has gone or shows
+    ;; something else; failing that, a new one opens where the reader is.
+    (dolist (window windows)
+      (unless (cl-find window kept :key #'vellum--view-window)
+        (let ((view (or (pop spare) (vellum--create-view window (vellum--initial-place)))))
+          (setf (vellum--view-window view) window)
+          (push view kept))))
+    (if kept
+        (mapc #'vellum--destroy-view spare)
+      ;; Out of sight: one view waits, hidden, for the buffer to be shown again.
+      (when spare
+        (vellum--remember-place)
+        (setf (vellum--view-window (car spare)) nil)
+        (vellum-module-hide (vellum--view-id (car spare)))
+        (mapc #'vellum--destroy-view (cdr spare))))
+    (mapc #'vellum--place-view kept)))
 
 (defun vellum--sync-views (&rest _)
-  "Put every view over the window showing its buffer; hide the rest."
-  (maphash (lambda (id buffer)
-             (if (buffer-live-p buffer)
-                 (vellum--sync-view id buffer)
-               (vellum-module-destroy id)
-               (remhash id vellum--views)))
-           vellum--views))
+  "Put a view over every window showing a PDF; hide or let go of the rest."
+  (dolist (buffer vellum--buffers)
+    (if (buffer-live-p buffer)
+        (with-current-buffer buffer (vellum--sync-buffer))
+      (setq vellum--buffers (delq buffer vellum--buffers))
+      (mapc #'vellum--destroy-view (vellum--buffer-views buffer)))))
 
 (defun vellum--watch-windows ()
-  (if (zerop (hash-table-count vellum--views))
+  (if (null vellum--buffers)
       (progn
         (remove-hook 'window-state-change-hook #'vellum--sync-views)
         (remove-hook 'window-size-change-functions #'vellum--sync-views)
@@ -218,11 +310,10 @@
       (mark . ,(format "rgba(%d,%d,%d,0.14)" (nth 0 rgb) (nth 1 rgb) (nth 2 rgb))))))
 
 (defun vellum--retheme (&rest _)
-  (maphash (lambda (_id buffer)
-             (when (buffer-live-p buffer)
-               (with-current-buffer buffer
-                 (vellum--js "theme" (vellum--colours)))))
-           vellum--views))
+  (dolist (buffer vellum--buffers)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (vellum--js-all "theme" (vellum--colours))))))
 
 
 ;;; Remembering places
@@ -243,17 +334,13 @@
                 (make-hash-table :test #'equal)))))
 
 (defun vellum--remember-place ()
-  (when (and buffer-file-name vellum--place)
-    (puthash buffer-file-name
-             (cl-loop for key in '(page top left scale)
-                      collect (cons key (alist-get key vellum--place)))
-             (vellum--places))))
+  (when-let* ((place (and buffer-file-name (vellum--place))))
+    (puthash buffer-file-name place (vellum--places))))
 
 (defun vellum--save-places ()
-  (maphash (lambda (_id buffer)
-             (when (buffer-live-p buffer)
-               (with-current-buffer buffer (vellum--remember-place))))
-           vellum--views)
+  (dolist (buffer vellum--buffers)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer (vellum--remember-place))))
   (when vellum--places
     (let (alist)
       (maphash (lambda (file place)
@@ -266,34 +353,37 @@
 
 ;;; Messages from the viewer
 
-(defun vellum--receive (type message)
+(defun vellum--receive (view type message)
+  "Act on MESSAGE, of TYPE, from VIEW of the current buffer."
   (let-alist message
     (pcase type
       ('ready
-       (setq vellum--ready t)
-       (let ((queue vellum--queue))
-         (setq vellum--queue nil)
+       (setf (vellum--view-ready view) t)
+       (let ((queue (vellum--view-queue view)))
+         (setf (vellum--view-queue view) nil)
          (dolist (script queue)
-           (vellum-module-eval vellum--id script))))
+           (vellum-module-eval (vellum--view-id view) script))))
       ('loaded
-       (setq vellum--loaded t
-             vellum--retries 0)
-       (vellum--js "outline")
-       (let ((pending vellum--after-load))
-         (setq vellum--after-load nil)
+       (setf (vellum--view-loaded view) t)
+       (setq vellum--retries 0)
+       (let ((pending (vellum--view-after-load view)))
+         (setf (vellum--view-after-load view) nil)
          (mapc #'funcall pending))
-       (run-hooks 'vellum-after-load-hook))
+       ;; Every view reloads the file; the buffer's own business is done once.
+       (when (eq view (vellum--view))
+         (vellum--send view "outline")
+         (run-hooks 'vellum-after-load-hook)))
       ('place
-       (setq vellum--place message)
-       (force-mode-line-update))
+       (setf (vellum--view-place view) message)
+       (force-mode-line-update t))
       ('failed
        ;; Most often the compiler is still writing the file: look again.
        (when (< vellum--retries 8)
          (cl-incf vellum--retries)
          (vellum--reload-soon 0.4)))
       ('focus
-       (let ((window (vellum--window (current-buffer))))
-         (when (and window (not (eq window (selected-window)))
+       (let ((window (vellum--view-window view)))
+         (when (and (window-live-p window) (not (eq window (selected-window)))
                     (not (minibuffer-window-active-p (minibuffer-window))))
            (select-window window))))
       ('inverse (vellum--inverse-search .page .x .y .word))
@@ -318,42 +408,34 @@
                      (if (equal .state "wrapped") " (wrapped)" ""))))))
       ('crashed
        (message "Vellum: the viewer stopped; reopening %s" (buffer-name))
-       (vellum--start))
+       (let ((window (vellum--view-window view))
+             (place (or (vellum--place view) (vellum--initial-place))))
+         (vellum--destroy-view view)
+         (vellum--create-view window place)
+         (vellum--sync-views)))
       ('error (message "Vellum: %s %s" .message (or .detail ""))))))
 
 
 ;;; The mode
 
 (defun vellum--start ()
-  "Create the view for the current buffer and show its file in it."
+  "Show the current buffer's file, in a view for each window showing it."
   (vellum--ensure-module)
-  (when vellum--id
-    (vellum-module-destroy vellum--id)
-    (remhash vellum--id vellum--views))
-  (setq vellum--id (format "v%d" (cl-incf vellum--counter))
-        vellum--ready nil
-        vellum--loaded nil
-        vellum--queue nil)
-  (puthash vellum--id (current-buffer) vellum--views)
-  (vellum-module-create vellum--id
-                        (expand-file-name "web" vellum-directory)
-                        "vellum://app/index.html"
-                        (vellum--channel))
-  (vellum--js "theme" (vellum--colours))
-  (vellum--js "load" buffer-file-name
-              (or (gethash buffer-file-name (vellum--places))
-                  `((page . 1) (top . 0) (scale . ,vellum-default-scale))))
+  (mapc #'vellum--destroy-view (vellum--buffer-views))
+  (cl-pushnew (current-buffer) vellum--buffers)
+  ;; The file starts loading now, out of sight; the first window to show
+  ;; the buffer takes this view.
+  (vellum--create-view nil (vellum--initial-place))
   (vellum--watch-windows)
   (vellum--sync-views))
 
 (defun vellum--stop ()
-  (when vellum--id
+  (when (memq (current-buffer) vellum--buffers)
     (vellum--remember-place)
     (when vellum--watch (file-notify-rm-watch vellum--watch))
     (when vellum--reload-timer (cancel-timer vellum--reload-timer))
-    (vellum-module-destroy vellum--id)
-    (remhash vellum--id vellum--views)
-    (setq vellum--id nil
+    (mapc #'vellum--destroy-view (vellum--buffer-views))
+    (setq vellum--buffers (delq (current-buffer) vellum--buffers)
           vellum--watch nil
           vellum--reload-timer nil)
     (vellum--watch-windows)))
@@ -367,9 +449,10 @@
                           (when (buffer-live-p buffer)
                             (with-current-buffer buffer
                               (setq vellum--reload-timer nil)
-                              (when (and vellum--id (file-exists-p buffer-file-name))
+                              (when (and (memq buffer vellum--buffers)
+                                         (file-exists-p buffer-file-name))
                                 (set-visited-file-modtime)
-                                (vellum--js "load" buffer-file-name)))))
+                                (vellum--js-all "load" buffer-file-name)))))
                         (current-buffer))))
 
 (defun vellum--watch-file ()
@@ -397,9 +480,12 @@
   (vellum--reload-soon 0))
 
 (defun vellum--mode-line ()
-  (if vellum--place
-      (let-alist vellum--place
-        (format "%d/%d  %d%%" .current .pages (round (* 100 (or .zoom 1)))))
+  ;; A mode line is drawn with its own window selected, so this is the
+  ;; place of the view in that window.
+  (if-let* ((view (vellum--view))
+            (place (vellum--view-place view)))
+      (let-alist place
+        (format "%d/%d  %d%%%%" .current .pages (round (* 100 (or .zoom 1)))))
     ""))
 
 (defun vellum-position ()
@@ -558,7 +644,7 @@ key held, goes to the TeX source of that spot.
   (interactive
    (list (or (and current-prefix-arg (prefix-numeric-value current-prefix-arg))
              (read-number (format "Page (1-%s): "
-                                  (or (alist-get 'pages vellum--place) "?"))))))
+                                  (or (alist-get 'pages (vellum--view-place (vellum--view))) "?"))))))
   (vellum--js "page" page))
 
 (defun vellum-back ()
@@ -713,6 +799,8 @@ own name."
     (with-current-buffer buffer
       (unless (derived-mode-p 'vellum-mode) (vellum-mode)))
     (display-buffer buffer vellum-display-buffer-action)
+    ;; The window has its view now, not at the next redisplay.
+    (vellum--sync-views)
     buffer))
 
 ;;;###autoload
@@ -727,13 +815,15 @@ own name."
       (user-error "No PDF yet%s" (if pdf (format ": %s" pdf) "")))
     (unless source (user-error "This buffer has no file"))
     (with-current-buffer (vellum-show pdf)
-      (let ((jump (lambda ()
-                    (if-let* ((boxes (vellum-synctex-forward pdf source line column)))
-                        (vellum--js "sync" boxes)
-                      (message "SyncTeX has no place for line %d" line)))))
-        (if vellum--loaded
+      ;; In a PDF shown twice, the window last used is the one that moves.
+      (let* ((view (vellum--view))
+             (jump (lambda ()
+                     (if-let* ((boxes (vellum-synctex-forward pdf source line column)))
+                         (vellum--send view "sync" boxes)
+                       (message "SyncTeX has no place for line %d" line)))))
+        (if (vellum--view-loaded view)
             (funcall jump)
-          (push jump vellum--after-load))))))
+          (push jump (vellum--view-after-load view)))))))
 
 
 ;;; AUCTeX
